@@ -1,176 +1,94 @@
+import streamlit as st
 import torch
 import torch.nn as nn
-import streamlit as st
 import os
 
-# === СИНХРОНИЗАЦИЯ НАСТРОЕК ===
-block_size = 64 
-device = 'cpu'         
-n_embd = 128            
-n_head = 2              
-n_layer = 2             
-MODEL_FILE = "transformer_model.pth"
+# 1. Архитектура модели MiniGPT
+class MiniGPT(nn.Module):
+    def __init__(self, vocab_size, embedding_dim=128, hidden_dim=256):
+        super().__init__()
+        self.token_embedding = nn.Embedding(vocab_size, embedding_dim)
+        self.lstm = nn.LSTM(embedding_dim, hidden_dim, batch_first=True)
+        self.fc = nn.Linear(hidden_dim, vocab_size)
 
-# === НАСТРОЙКА СТРАНИЦЫ ===
-st.set_page_config(page_title="Мой Робот ИИ", page_icon="🤖", layout="wide")
+    def forward(self, x):
+        embedded = self.token_embedding(x)
+        lstm_out, _ = self.lstm(embedded)
+        logits = self.fc(lstm_out)
+        return logits
 
-# === БОКОВАЯ ПАНЕЛЬ ДЛЯ МАМЫ (В ЛЕВОМ УГЛУ) ===
+# Настройка интерфейса Streamlit
+st.set_page_config(page_title="Мой Робот ИИ", page_icon="🤖")
+st.title("🤖 Мой Робот ИИ на базе датасета Saiga")
+
+# Боковая панель с настройками
 with st.sidebar:
-    st.title("💡 Шпаргалка для Мамы")
-    st.write("Привет, мам! Этот ИИ полностью написал твой сын.")
-    st.write("Робот учился на специальной базе знаний, поэтому лучше всего он поймет вопросы на эти темы:")
+    st.header("⚙️ Настройки ИИ")
     
-    st.markdown("""
-    * **Приветствие:** `Привет!`, `Хай, как звать?`
-    * **О роботе:** `Кто тебя создал?`, `Чья ты разработка?`, `Что ты умеешь делать?`
-    * **Железо:** `Какой графический чип самый мощный?`, `Зачем нужна кастомная вода?`
-    * **Прочее:** `Сколько будет два плюс два?`, `Расскажи анекдот про ИИ?`
-    """)
-    st.info("💡 Пиши вопросы точно так же, как в примерах, чтобы робот ответил правильно!")
+    # НАШ СЛАЙДЕР! Значение по умолчанию 0.3, минимум 0.1, максимум 10.0
+    temperature = st.slider(
+        "Креативность (Temperature):", 
+        min_value=0.1, 
+        max_value=10.0, 
+        value=0.3, 
+        step=0.1,
+        help="0.3 — четкий русский язык. 1.0 — фантазии. 10.0 — режим безумия (китайский язык)!"
+    )
+    
+    st.markdown("---")
+    st.header("💡 Шпаргалка")
+    st.write("Попробуй выкрутить ползунок на 10.0 и написать 'Привет'!")
 
-# === ЗАГРУЗКА МОДЕЛИ И СЛОВАРЯ ===
-if not os.path.exists(MODEL_FILE):
-    st.error(f"Файл '{MODEL_FILE}' не найден в папке проекта!")
-    st.stop()
+# 2. Безопасная загрузка модели и словаря
+MODEL_PATH = "transformer_model.pth"
 
-checkpoint = torch.load(MODEL_FILE, map_location=device)
-
-if isinstance(checkpoint, dict) and 'chars' in checkpoint:
-    chars = checkpoint['chars']
-    model_weights = checkpoint['model_state_dict']
+if not os.path.exists(MODEL_PATH):
+    st.error(f"Файл {MODEL_PATH} не найден!")
 else:
-    st.error("Обнаружен старый чекпоинт. Переобучи модель с новым train.py")
-    st.stop()
-
-vocab_size = len(chars)
-stoi = { ch:i for i,ch in enumerate(chars) }
-itos = { i:ch for i,ch in enumerate(chars) }
-encode = lambda s: [stoi[c] for c in s if c in stoi] 
-decode = lambda l: ''.join([itos[i] for i in l])
-
-# === АРХИТЕКТУРА ===
-class CausalSelfAttention(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.c_attn = nn.Linear(n_embd, 3 * n_embd)
-        self.c_proj = nn.Linear(n_embd, n_embd)
-        self.register_buffer("bias", torch.tril(torch.ones(block_size, block_size))
-                                     .view(1, 1, block_size, block_size))
-    def forward(self, x):
-        B, T, C = x.size()
-        q, k, v  = self.c_attn(x).split(n_embd, dim=2)
-        k = k.view(B, T, n_head, C // n_head).transpose(1, 2)
-        q = q.view(B, T, n_head, C // n_head).transpose(1, 2)
-        v = v.view(B, T, n_head, C // n_head).transpose(1, 2)
-        att = (q @ k.transpose(-2, -1)) * (1.0 / (k.size(-1) ** 0.5))
-        att = att.masked_fill(self.bias[:,:,:T,:T] == 0, float('-inf'))
-        att = nn.functional.softmax(att, dim=-1)
-        y = att @ v
-        y = y.transpose(1, 2).contiguous().view(B, T, C)
-        return self.c_proj(y)
-
-class MLP(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.c_fc    = nn.Linear(n_embd, 4 * n_embd)
-        self.gelu    = nn.GELU()
-        self.c_proj  = nn.Linear(4 * n_embd, n_embd)
-    def forward(self, x):
-        return self.c_proj(self.gelu(self.c_fc(x)))
-
-class Block(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.ln_1 = nn.LayerNorm(n_embd)
-        self.attn = CausalSelfAttention()
-        self.ln_2 = nn.LayerNorm(n_embd)
-        self.mlp = MLP()
-    def forward(self, x):
-        x = x + self.attn(self.ln_1(x))
-        x = x + self.mlp(self.ln_2(x))
-        return x
-
-class LightTransformer(nn.Module):
-    def __init__(self):
-        super().__init__()
-        self.transformer = nn.ModuleDict(dict(
-            wte = nn.Embedding(vocab_size, n_embd),
-            wpe = nn.Embedding(block_size, n_embd),
-            h = nn.ModuleList([Block() for _ in range(n_layer)]),
-            ln_f = nn.LayerNorm(n_embd),
-        ))
-        self.lm_head = nn.Linear(n_embd, vocab_size, bias=False)
-
-    def forward(self, idx):
-        t = idx.size(1)
-        pos = torch.arange(0, t, dtype=torch.long, device=idx.device)
-        x = self.transformer.wte(idx) + self.transformer.wpe(pos)
-        for block in self.transformer.h:
-            x = block(x)
-        x = self.transformer.ln_f(x)
-        return self.lm_head(x), None
-
-    def generate(self, idx, max_new_tokens):
-        for _ in range(max_new_tokens):
-            idx_cond = idx[:, -block_size:]
-            logits, _ = self(idx_cond)
-            logits = logits[:, -1, :]
-            idx_next = torch.argmax(logits, dim=-1, keepdim=True)
-            idx = torch.cat((idx, idx_next), dim=1)
-            if idx_next.item() == stoi.get('\n', -1):
-                break
-        return idx
-
-@st.cache_resource
-def load_my_model():
-    model = LightTransformer().to(device)
-    model.load_state_dict(model_weights)
+    checkpoint = torch.load(MODEL_PATH, map_location=torch.device('cpu'))
+    stoi = checkpoint['stoi']
+    itos = checkpoint['itos']
+    vocab_size = checkpoint['vocab_size']
+    
+    model = MiniGPT(vocab_size)
+    model.load_state_dict(checkpoint['model_state_dict'])
     model.eval()
-    return model
 
-model = load_my_model()
-
-# === ГЛАВНЫЙ ИНТЕРФЕЙС ===
-st.title("🤖 Мой Карманный Трансформер")
-st.subheader("Локальная нейросеть, обученная с нуля")
-
-if "messages" not in st.session_state:
-    st.session_state.messages = []
-
-for message in st.session_state.messages:
-    with st.chat_message(message["role"]):
-        st.markdown(message["content"])
-
-if user_input := st.chat_input("Напиши боту что-нибудь..."):
-    with st.chat_message("user"):
-        st.markdown(user_input)
-    st.session_state.messages.append({"role": "user", "content": user_input})
-
-    # Трюк жесткого маппинга для коротких фраз (борьба со сбоем контекста)
-    low_input = user_input.lower().strip()
-    if "привет" in low_input:
-        prompt = "Привет! Как тебя зовут? Ответ:"
-    elif "хай" in low_input or "звать" in low_input:
-        prompt = "Хай, как звать? Ответ:"
-    elif "кто ты" in low_input:
-        prompt = "Здравствуй! Кто ты? Ответ:"
-    else:
-        prompt = f"\n{user_input.strip()} Ответ:"
-    
-    context = torch.tensor([encode(prompt)], dtype=torch.long, device=device)
-    
-    if context.size(1) == 0:
-        bot_response = "Я не знаю таких символов. Попробуй спросить по-другому!"
-    else:
-        with torch.no_grad():
-            generated_tokens = model.generate(context, max_new_tokens=64)[0].tolist()
-        full_text = decode(generated_tokens)
+    # Функция генерации текста (теперь принимает temperature со слайдера)
+    def generate_text(prompt, max_new_tokens=130, temp=0.3):
+        full_prompt = f"Пользователь: {prompt}\nБот: "
+        input_ids = [stoi[c] for c in full_prompt if c in stoi]
+        if not input_ids:
+            input_ids = [0]
+            
+        context_tensor = torch.tensor([input_ids], dtype=torch.long)
+        generated = input_ids.copy()
         
-        try:
-            bot_response = full_text.split("Ответ:")[1].strip()
-        except:
-            bot_response = full_text[len(prompt):].strip()
+        with torch.no_grad():
+            for _ in range(max_new_tokens):
+                logits = model(context_tensor)
+                # Делим на выбранную пользователем температуру
+                next_token_logits = logits[:, -1, :] / temp
+                probs = torch.softmax(next_token_logits, dim=-1)
+                
+                next_token = torch.multinomial(probs, num_samples=1).item()
+                
+                generated.append(next_token)
+                context_tensor = torch.tensor([generated], dtype=torch.long)
+                
+                if itos.get(next_token, "") == "\n" and temp < 2.0:
+                    break
+                    
+        result_text = "".join([itos.get(i, "") for i in generated])
+        bot_reply = result_text.replace(full_prompt, "").strip()
+        return bot_reply if bot_reply else "...(робот задумался)..."
 
-    with st.chat_message("assistant"):
-        st.markdown(bot_response)
-    st.session_state.messages.append({"role": "assistant", "content": bot_response})
+    # Интерфейс чата
+    user_input = st.text_input("Напишите что-нибудь вашему ИИ:", placeholder="Пример: Привет!")
+
+    if user_input:
+        with st.spinner("Робот думает..."):
+            # Передаем температуру из слайдера прямо в функцию
+            reply = generate_text(user_input, temp=temperature)
+            st.markdown(f"**Ответ робота (при Temp = {temperature}):**")
+            st.info(reply)
