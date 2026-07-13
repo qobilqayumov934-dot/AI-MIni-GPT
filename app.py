@@ -1,26 +1,51 @@
 import streamlit as st
-from google import genai
-from google.genai import types
+from groq import Groq
 
 st.set_page_config(page_title="Мой Супер ИИ", page_icon="🧠")
-st.title("🧠 Мой Умный Робот на базе Gemini")
+st.title("🧠 Мой Умный Робот")
 
-# Пытаемся автоматически достать скрытый ключ из настроек Streamlit
+with st.sidebar:
+    st.header("⚙️ Настройки ИИ")
+    temperature = st.slider(
+        "Креативность (Temperature):", 
+        min_value=0.0, 
+        max_value=2.0, 
+        value=0.7, 
+        step=0.1
+    )
+
+# Пытаемся безопасно достать ключ из секретов сервера
 try:
-    # КЛЮЧ НЕ В КОДЕ! Он берется из защищенного хранилища сайта
-    api_key = st.secrets["GEMINI_API_KEY"]
-    client = genai.Client(api_key=api_key)
+    API_KEY = st.secrets["GROQ_API_KEY"]
+    client = Groq(api_key=API_KEY)
     
     user_input = st.text_input("Напишите что-нибудь вашему ИИ:", placeholder="Например: Как дела?")
 
     if user_input:
-        with st.spinner("ИИ думает..."):
-            response = client.models.generate_content(
-                model='gemini-2.5-flash',
-                contents=user_input,
+        with st.spinner("ИИ анализирует твой тон..."):
+            chat_completion = client.chat.completions.create(
+                messages=[
+                    {
+                        "role": "system",
+                        "content": (
+                            "Ты — адаптивный ИИ. Твой характер полностью зависит от тона собеседника. "
+                            "1. Если пользователь пишет грубо, хамит или обзывается — отвечай взаимно грубо, иронично и токсично. "
+                            "2. Если пользователь пишет вежливо или нейтрально — будь добрым, вежливым и уважительным помощником. "
+                            "Отвечай строго на русском языке, коротко и емко."
+                        )
+                    },
+                    {
+                        "role": "user",
+                        "content": user_input,
+                    }
+                ],
+                model="llama-3.3-70b-versatile",
+                temperature=temperature,
             )
-            st.info(response.text)
+            
+            st.markdown(f"**Ответ робота:**")
+            st.info(chat_completion.choices[0].message.content)
 
 except Exception as e:
-    st.error("🔑 Ошибка доступа! На сервере Streamlit не настроен секретный API-ключ.")
-    st.info("Администратор: Зайди в настройки (Secrets) на share.streamlit.io и добавь GEMINI_API_KEY")
+    st.error("🔑 Ошибка доступа! На сервере Streamlit не настроен или не прочитан ключ GROQ_API_KEY.")
+    st.info("Проверь вкладку Secrets в настройках приложения на share.streamlit.io")
